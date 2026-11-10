@@ -35,3 +35,6 @@ Thumbs.db
 
 # Kotlin
 .kotlin/
+
+# emulator captures
+screenshots/
