@@ -15,6 +15,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -26,14 +27,26 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationManagerCompat
 import com.yourname.dayplanner.alarm.AlarmScheduler
+import com.yourname.dayplanner.data.AppDatabase
+import com.yourname.dayplanner.data.DayEntry
+import com.yourname.dayplanner.data.DemoSeed
+import com.yourname.dayplanner.engine.OccurrenceGenerator
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.time.DayOfWeek
+import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.time.format.TextStyle
+import java.time.temporal.TemporalAdjusters
 import java.util.Locale
 
 /* ---------------------------------------------------------------- palette */
@@ -56,34 +69,54 @@ private fun categoryColor(category: String): Color = when (category) {
     else -> Color(0xFF667085)
 }
 
-/* ------------------------------------------------------------ demo data */
+/* ---------------------------------------------------------------- helpers */
 
-/**
- * Placeholder timetable so the screen can be reviewed before it is backed by
- * the Room occurrence query. Swap this list for the DAO flow later.
- */
-private data class Slot(
-    val time: String,
-    val endTime: String,
+/** Week starts Monday. */
+private fun mondayOf(day: LocalDate): LocalDate =
+    day.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
+
+private fun hhmm(minuteOfDay: Int): String =
+    String.format(Locale.ENGLISH, "%02d:%02d", (minuteOfDay / 60) % 24, minuteOfDay % 60)
+
+private fun durationText(minutes: Int): String = when {
+    minutes < 60 -> "$minutes min"
+    minutes % 60 == 0 -> "${minutes / 60} h"
+    else -> "${minutes / 60} h ${minutes % 60}"
+}
+
+private fun weekdayLabel(mask: Int): String {
+    if (mask == 0) return "Weekly"
+    if (mask == 0b0011111) return "Mon-Fri"
+    if (mask == 0b1111111) return "Daily"
+    val names = listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+    val picked = names.filterIndexed { i, _ -> (mask shr i) and 1 == 1 }
+    return if (picked.size <= 3) picked.joinToString(", ") else "${picked.size} days"
+}
+
+private fun repeatLabel(frequency: String?, interval: Int, weekdaysMask: Int): String {
+    val n = interval.coerceAtLeast(1)
+    return when (frequency) {
+        "MINUTES" -> "Every $n min"
+        "HOURS" -> "Every $n h"
+        "DAYS" -> if (n == 1) "Daily" else "Every $n days"
+        "WEEKLY" -> weekdayLabel(weekdaysMask)
+        "MONTHLY" -> if (n == 1) "Monthly" else "Every $n months"
+        "YEARLY" -> "Yearly"
+        else -> "Once"
+    }
+}
+
+/** One row of the timeline, already formatted for display. */
+private data class UiSlot(
+    val id: Long,
+    val start: String,
+    val end: String,
     val title: String,
     val category: String,
     val repeat: String,
     val duration: String,
-    val done: Boolean = false,
-    val isNext: Boolean = false
-)
-
-private val demoTimetable = listOf(
-    Slot("06:45", "07:15", "Morning routine", "Routine", "Daily", "30 min", done = true),
-    Slot("07:30", "09:00", "Data structures: graphs", "Study", "Mon-Fri", "1 h 30", done = true),
-    Slot("09:15", "09:45", "Breakfast with family", "Personal", "Daily", "30 min", done = true),
-    Slot("10:00", "11:00", "Maturity Ledge: layout fixes", "Project", "Mon, Wed, Fri", "1 h", isNext = true),
-    Slot("11:10", "11:25", "Stretch + water", "Health", "Every 90 min", "15 min"),
-    Slot("12:30", "13:15", "Lunch", "Personal", "Daily", "45 min"),
-    Slot("14:00", "15:30", "Compose: state hoisting", "Study", "Mon-Fri", "1 h 30"),
-    Slot("16:00", "16:30", "Walk outside", "Health", "Daily", "30 min"),
-    Slot("18:30", "19:00", "Evening review", "Growth", "Daily", "30 min"),
-    Slot("21:30", "22:00", "Journal + plan tomorrow", "Routine", "Daily", "30 min")
+    val done: Boolean,
+    val isNext: Boolean
 )
 
 /* --------------------------------------------------------------- activity */
@@ -120,11 +153,76 @@ class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun Timetable(onSetup: () -> Unit) {
-        val today = remember {
-            LocalDate.now().format(DateTimeFormatter.ofPattern("EEEE, d MMMM", Locale.ENGLISH))
+        val context = LocalContext.current
+        val zone = remember { ZoneId.systemDefault() }
+        val today = remember { LocalDate.now() }
+
+        var selected by remember { mutableStateOf(today) }
+        var weekEntries by remember { mutableStateOf<List<DayEntry>>(emptyList()) }
+        var loaded by remember { mutableStateOf(false) }
+        var version by remember { mutableIntStateOf(0) }
+
+        val weekStart = mondayOf(selected)
+
+        // Seed demo items once, then materialise occurrences from two weeks back onward.
+        LaunchedEffect(Unit) {
+            withContext(Dispatchers.IO) {
+                val db = AppDatabase.get(context)
+                val empty = db.itemDao().allActive().isEmpty()
+                DemoSeed.ensure(db)
+                OccurrenceGenerator(db).topUp(45, mondayOf(today).minusWeeks(2).atStartOfDay())
+                if (empty) DemoSeed.markSampleDone(db)
+            }
+            version++
         }
-        val done = demoTimetable.count { it.done }
-        val total = demoTimetable.size
+
+        // Everything scheduled in the visible week, reloaded when the week changes.
+        LaunchedEffect(weekStart, version) {
+            val from = weekStart.atStartOfDay(zone).toInstant().toEpochMilli()
+            val to = weekStart.plusWeeks(1).atStartOfDay(zone).toInstant().toEpochMilli()
+            weekEntries = withContext(Dispatchers.IO) {
+                AppDatabase.get(context).occurrenceDao().dayEntries(from, to)
+            }
+            loaded = true
+        }
+
+        val byDay = remember(weekEntries, zone) {
+            weekEntries.groupBy { Instant.ofEpochMilli(it.scheduledAt).atZone(zone).toLocalDate() }
+        }
+        val dayRows = byDay[selected].orEmpty()
+        val now = System.currentTimeMillis()
+
+        val done = dayRows.count { it.status == "DONE" || it.status == "PARTIAL" }
+        val total = dayRows.size
+        val plannedMin = dayRows.sumOf { it.durationMin }
+        val focusMin = dayRows
+            .filter { it.category == "Study" || it.category == "Project" }
+            .sumOf { it.durationMin }
+        val next = if (selected < today) null else dayRows.firstOrNull {
+            it.status == "PENDING" && (selected > today || it.scheduledAt >= now)
+        }
+
+        val slots = remember(dayRows, next?.id, zone) {
+            dayRows.map { e ->
+                val start = Instant.ofEpochMilli(e.scheduledAt).atZone(zone).toLocalTime()
+                val startMin = start.hour * 60 + start.minute
+                UiSlot(
+                    id = e.id,
+                    start = hhmm(startMin),
+                    end = hhmm(startMin + e.durationMin),
+                    title = e.title,
+                    category = e.category,
+                    repeat = repeatLabel(e.frequency, e.repeatInterval, e.weekdaysMask),
+                    duration = durationText(e.durationMin),
+                    done = e.status == "DONE" || e.status == "PARTIAL",
+                    isNext = next?.id == e.id
+                )
+            }
+        }
+
+        val title = if (selected == today) "Today"
+        else selected.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.ENGLISH)
+        val subtitle = selected.format(DateTimeFormatter.ofPattern("EEEE, d MMMM", Locale.ENGLISH))
 
         Scaffold(
             containerColor = PageBg,
@@ -132,8 +230,8 @@ class MainActivity : ComponentActivity() {
                 TopAppBar(
                     title = {
                         Column {
-                            Text("Today", fontSize = 22.sp, fontWeight = FontWeight.SemiBold, color = Ink)
-                            Text(today, fontSize = 12.sp, color = Muted)
+                            Text(title, fontSize = 22.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+                            Text(subtitle, fontSize = 12.sp, color = Muted)
                         }
                     },
                     actions = {
@@ -150,7 +248,8 @@ class MainActivity : ComponentActivity() {
                 contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                item { SummaryCard(done, total) }
+                item { WeekStrip(weekStart, selected, byDay, onWeek = { selected = selected.plusWeeks(it) }) { selected = it } }
+                item { SummaryCard(done, total, plannedMin, focusMin, if (next == null) "—" else hhmm(timeOf(next.scheduledAt, zone))) }
                 item {
                     Text(
                         "SCHEDULE",
@@ -161,13 +260,108 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.padding(start = 4.dp, top = 8.dp, bottom = 4.dp)
                     )
                 }
-                items(demoTimetable) { slot -> TimelineRow(slot) }
+                if (loaded && slots.isEmpty()) {
+                    item { EmptyDay() }
+                }
+                items(slots, key = { it.id }) { slot -> TimelineRow(slot) }
             }
         }
     }
 
     @Composable
-    private fun SummaryCard(done: Int, total: Int) {
+    private fun WeekStrip(
+        weekStart: LocalDate,
+        selected: LocalDate,
+        byDay: Map<LocalDate, List<DayEntry>>,
+        onWeek: (Long) -> Unit,
+        onSelect: (LocalDate) -> Unit
+    ) {
+        val range = weekStart.format(DateTimeFormatter.ofPattern("d MMM", Locale.ENGLISH)) + " – " +
+            weekStart.plusDays(6).format(DateTimeFormatter.ofPattern("d MMM", Locale.ENGLISH))
+        Column(Modifier.fillMaxWidth().padding(top = 4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    range.uppercase(Locale.ENGLISH),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 1.sp,
+                    color = Muted,
+                    modifier = Modifier.weight(1f)
+                )
+                Chevron("‹") { onWeek(-1) }
+                Spacer(Modifier.width(4.dp))
+                Chevron("›") { onWeek(1) }
+            }
+            Spacer(Modifier.height(6.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                for (i in 0..6) {
+                    val day = weekStart.plusDays(i.toLong())
+                    val isSelected = day == selected
+                    val rows = byDay[day].orEmpty()
+                    val allDone = rows.isNotEmpty() && rows.all { it.status == "DONE" || it.status == "PARTIAL" }
+                    Column(
+                        Modifier.weight(1f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (isSelected) Accent else Color.White)
+                            .border(1.dp, if (isSelected) Accent else Hairline, RoundedCornerShape(12.dp))
+                            .clickable { onSelect(day) }
+                            .padding(vertical = 7.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            day.dayOfWeek.getDisplayName(TextStyle.NARROW, Locale.ENGLISH),
+                            fontSize = 10.sp,
+                            color = if (isSelected) Color.White.copy(alpha = 0.85f) else Muted
+                        )
+                        Text(
+                            "${day.dayOfMonth}",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (isSelected) Color.White else Ink
+                        )
+                        Box(
+                            Modifier.padding(top = 3.dp).size(4.dp).clip(CircleShape).background(
+                                when {
+                                    isSelected -> Color.White
+                                    rows.isEmpty() -> Color.Transparent
+                                    allDone -> Good
+                                    else -> Accent.copy(alpha = 0.5f)
+                                }
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun Chevron(glyph: String, onClick: () -> Unit) {
+        Box(
+            Modifier.size(28.dp).clip(CircleShape).clickable(onClick = onClick),
+            contentAlignment = Alignment.Center
+        ) { Text(glyph, fontSize = 18.sp, color = Muted) }
+    }
+
+    @Composable
+    private fun EmptyDay() {
+        Card(
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.White),
+            elevation = CardDefaults.cardElevation(0.dp),
+            modifier = Modifier.fillMaxWidth().border(1.dp, Hairline, RoundedCornerShape(14.dp))
+        ) {
+            Text(
+                "Nothing planned for this day.",
+                fontSize = 13.sp,
+                color = Muted,
+                modifier = Modifier.padding(16.dp)
+            )
+        }
+    }
+
+    @Composable
+    private fun SummaryCard(done: Int, total: Int, plannedMin: Int, focusMin: Int, nextAt: String) {
         Card(
             shape = RoundedCornerShape(18.dp),
             colors = CardDefaults.cardColors(containerColor = Color.White),
@@ -196,16 +390,16 @@ class MainActivity : ComponentActivity() {
                 }
                 Spacer(Modifier.height(12.dp))
                 LinearProgressIndicator(
-                    progress = { done.toFloat() / total },
+                    progress = { if (total == 0) 0f else done.toFloat() / total },
                     modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(50)),
                     color = Accent,
                     trackColor = Color(0xFFEDEFF3)
                 )
                 Spacer(Modifier.height(14.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(22.dp)) {
-                    Stat("Planned", "6 h 30")
-                    Stat("Focus", "3 h")
-                    Stat("Next", "10:00")
+                    Stat("Planned", durationText(plannedMin))
+                    Stat("Focus", durationText(focusMin))
+                    Stat("Next", nextAt)
                 }
             }
         }
@@ -220,17 +414,17 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun TimelineRow(slot: Slot) {
+    private fun TimelineRow(slot: UiSlot) {
         val color = categoryColor(slot.category)
         Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
             Column(Modifier.width(46.dp).padding(top = 14.dp), horizontalAlignment = Alignment.End) {
                 Text(
-                    slot.time,
+                    slot.start,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,
                     color = if (slot.isNext) Accent else Muted
                 )
-                Text(slot.endTime, fontSize = 10.sp, color = Color(0xFF98A2B3))
+                Text(slot.end, fontSize = 10.sp, color = Color(0xFF98A2B3))
             }
             Column(
                 Modifier.width(26.dp).fillMaxHeight(),
@@ -397,4 +591,10 @@ class MainActivity : ComponentActivity() {
             Toast.LENGTH_SHORT
         ).show()
     }
+}
+
+/** Minute of day for an epoch-millis timestamp in the given zone. */
+private fun timeOf(epochMillis: Long, zone: ZoneId): Int {
+    val t = Instant.ofEpochMilli(epochMillis).atZone(zone).toLocalTime()
+    return t.hour * 60 + t.minute
 }
