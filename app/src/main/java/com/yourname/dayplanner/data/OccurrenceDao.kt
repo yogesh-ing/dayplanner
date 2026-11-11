@@ -35,6 +35,13 @@ interface OccurrenceDao {
 
     @Query("UPDATE occurrences SET status = :status, actualEnd = :at, skipReason = :reason WHERE id = :id") suspend fun mark(id: Long, status: OccStatus, at: Long?, reason: SkipReason?)
 
+    /**
+     * Drops pending occurrences from [from] onward, leaving completed and past
+     * rows alone. Used when an item is edited, stopped or rescheduled.
+     */
+    @Query("DELETE FROM occurrences WHERE itemId = :itemId AND status = 'PENDING' AND scheduledAt >= :from")
+    suspend fun deletePendingFrom(itemId: Long, from: Long): Int
+
     /** Everything scheduled in [from, to), with the item and rule needed to render it. */
     @Query(
         """

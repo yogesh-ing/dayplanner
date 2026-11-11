@@ -1,5 +1,6 @@
 package com.yourname.dayplanner
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -18,9 +19,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.yourname.dayplanner.data.AppDatabase
+import com.yourname.dayplanner.data.Frequency
 import com.yourname.dayplanner.data.Item
 import com.yourname.dayplanner.data.ItemOccurrence
+import com.yourname.dayplanner.data.RepeatRule
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.DayOfWeek
 import java.time.Instant
@@ -199,15 +203,22 @@ internal fun weeksOf(from: LocalDate, to: LocalDate): List<List<LocalDate?>> {
 internal fun ProgressPanel(itemId: Long, onClose: () -> Unit) {
     val context = LocalContext.current
     val zone = remember { ZoneId.systemDefault() }
+    val scope = rememberCoroutineScope()
     var range by remember { mutableStateOf(ProgressRange.MONTH) }
     var progress by remember { mutableStateOf<Progress?>(null) }
+    var rule by remember { mutableStateOf<RepeatRule?>(null) }
     var loading by remember { mutableStateOf(true) }
+    var editing by remember { mutableStateOf(false) }
+    var refresh by remember { mutableIntStateOf(0) }
+    var confirming by remember { mutableStateOf<ManageAction?>(null) }
 
-    LaunchedEffect(itemId, range) {
+    LaunchedEffect(itemId, range, refresh) {
         loading = true
+        var found: RepeatRule? = null
         val shown = withContext(Dispatchers.IO) {
             val db = AppDatabase.get(context)
             val item = db.itemDao().get(itemId)
+            found = db.ruleDao().get(itemId)
             if (item == null) {
                 null
             } else {
@@ -221,8 +232,44 @@ internal fun ProgressPanel(itemId: Long, onClose: () -> Unit) {
                 buildProgress(item, rows, range, today, System.currentTimeMillis(), zone)
             }
         }
+        rule = found
         progress = shown
         loading = false
+    }
+
+    val ready = progress
+    if (editing && ready != null) {
+        BackHandler { editing = false }
+        val ruleStart = rule?.startDate ?: LocalDate.now()
+        ItemFormPanel(
+            heading = "Edit item",
+            dayText = ruleStart.format(DateTimeFormatter.ofPattern("EEE d MMM", Locale.ENGLISH)),
+            dayNote = "Start date stays as it was",
+            initial = NewItemDraft(
+                title = ready.item.title,
+                category = ready.item.category,
+                startMinuteOfDay = ready.item.startMinuteOfDay ?: 540,
+                durationMin = ready.item.durationMin,
+                repeat = choiceOf(rule)
+            ),
+            onCancel = { editing = false },
+            onSave = { draft ->
+                scope.launch {
+                    withContext(Dispatchers.IO) {
+                        updateItem(
+                            AppDatabase.get(context),
+                            ready.item,
+                            draft,
+                            ruleStart,
+                            LocalDate.now()
+                        )
+                    }
+                    editing = false
+                    refresh++
+                }
+            }
+        )
+        return
     }
 
     Scaffold(
@@ -277,9 +324,62 @@ internal fun ProgressPanel(itemId: Long, onClose: () -> Unit) {
                         )
                     }
                 }
+                ManageCard(
+                    onEdit = { editing = true },
+                    onStop = { confirming = ManageAction.STOP },
+                    onDelete = { confirming = ManageAction.DELETE }
+                )
                 Spacer(Modifier.height(28.dp))
             }
         }
+    }
+
+    val pending = confirming
+    val target = progress?.item
+    if (pending != null && target != null) {
+        AlertDialog(
+            onDismissRequest = { confirming = null },
+            title = {
+                Text(
+                    if (pending == ManageAction.STOP) "Stop this item?" else "Delete this item?",
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Ink
+                )
+            },
+            text = {
+                Text(
+                    if (pending == ManageAction.STOP)
+                        "It stops appearing on your timetable from today. Everything already logged stays, so this screen keeps its history."
+                    else
+                        "This removes the item, its repeat rule and every day it was scheduled, including the ones you completed.",
+                    fontSize = 13.sp,
+                    color = Muted
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirming = null
+                    scope.launch {
+                        withContext(Dispatchers.IO) {
+                            val db = AppDatabase.get(context)
+                            if (pending == ManageAction.STOP) stopItem(db, target, LocalDate.now())
+                            else deleteItem(db, target)
+                        }
+                        onClose()
+                    }
+                }) {
+                    Text(
+                        if (pending == ManageAction.STOP) "Stop" else "Delete",
+                        color = if (pending == ManageAction.STOP) Accent else Danger
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirming = null }) { Text("Cancel", color = Muted) }
+            },
+            containerColor = CardBg
+        )
     }
 }
 
@@ -507,3 +607,47 @@ private fun Caption(text: String) {
 private fun reasonLabel(raw: String): String =
     raw.lowercase(Locale.ENGLISH).split('_')
         .joinToString(" ") { word -> word.replaceFirstChar { it.uppercase(Locale.ENGLISH) } }
+
+/* --------------------------------------------------------------- manage */
+
+internal enum class ManageAction { STOP, DELETE }
+
+/** Which of the form's repeat choices an existing rule corresponds to. */
+private fun choiceOf(rule: RepeatRule?): RepeatChoice = when {
+    rule == null -> RepeatChoice.ONCE
+    rule.frequency == Frequency.NONE -> RepeatChoice.ONCE
+    rule.frequency == Frequency.DAYS && rule.interval <= 1 -> RepeatChoice.DAILY
+    rule.frequency == Frequency.WEEKLY && rule.weekdaysMask == 0b0011111 -> RepeatChoice.WEEKDAYS
+    rule.frequency == Frequency.WEEKLY -> RepeatChoice.WEEKLY
+    else -> RepeatChoice.DAILY
+}
+
+@Composable
+private fun ManageCard(onEdit: () -> Unit, onStop: () -> Unit, onDelete: () -> Unit) {
+    Card(
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = CardBg),
+        elevation = CardDefaults.cardElevation(0.dp),
+        modifier = Modifier.fillMaxWidth().border(1.dp, Hairline, RoundedCornerShape(18.dp))
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(
+                "MANAGE",
+                fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 1.sp,
+                color = Muted
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onEdit, modifier = Modifier.weight(1f)) { Text("Edit") }
+                OutlinedButton(onClick = onStop, modifier = Modifier.weight(1f)) { Text("Stop") }
+                OutlinedButton(onClick = onDelete, modifier = Modifier.weight(1f)) { Text("Delete") }
+            }
+            Text(
+                "Stopping keeps every day you already logged; deleting does not.",
+                fontSize = 11.sp,
+                color = Muted
+            )
+        }
+    }
+}

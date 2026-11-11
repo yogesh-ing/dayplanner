@@ -256,7 +256,7 @@ class MainActivity : ComponentActivity() {
         val inspected = inspecting
         if (inspected != null) {
             BackHandler { inspecting = null }
-            ProgressPanel(itemId = inspected.itemId, onClose = { inspecting = null })
+            ProgressPanel(itemId = inspected.itemId, onClose = { inspecting = null; version++ })
             return
         }
 
