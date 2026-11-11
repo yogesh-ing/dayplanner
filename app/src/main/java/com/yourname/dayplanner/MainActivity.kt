@@ -51,15 +51,7 @@ import java.time.format.TextStyle
 import java.time.temporal.TemporalAdjusters
 import java.util.Locale
 
-/* ---------------------------------------------------------------- palette */
-
-private val Ink = Color(0xFF101828)
-private val Muted = Color(0xFF667085)
-private val Hairline = Color(0xFFE4E7EC)
-private val PageBg = Color(0xFFF7F8FA)
-private val Accent = Color(0xFF4F46E5)
-private val AccentSoft = Color(0xFFEEF0FF)
-private val Good = Color(0xFF12B76A)
+/* -------------------------------------------------------------- categories */
 
 private fun categoryColor(category: String): Color = when (category) {
     "Study" -> Color(0xFF4F46E5)
@@ -133,7 +125,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme(colorScheme = lightColorScheme(background = PageBg, surface = Color.White)) {
+            DayPlannerTheme {
                 Surface(Modifier.fillMaxSize(), color = PageBg) {
                     var setup by remember { mutableStateOf(false) }
                     if (setup) {
@@ -163,8 +155,10 @@ class MainActivity : ComponentActivity() {
         var weekEntries by remember { mutableStateOf<List<DayEntry>>(emptyList()) }
         var loaded by remember { mutableStateOf(false) }
         var version by remember { mutableIntStateOf(0) }
+        var adding by remember { mutableStateOf(false) }
 
         val weekStart = mondayOf(selected)
+        val scope = rememberCoroutineScope()
 
         // Seed demo items once, then materialise occurrences from two weeks back onward.
         LaunchedEffect(Unit) {
@@ -189,7 +183,6 @@ class MainActivity : ComponentActivity() {
         }
 
         // Tapping a row completes it; tapping again clears the completion.
-        val scope = rememberCoroutineScope()
         val toggle: (UiSlot) -> Unit = { slot ->
             scope.launch {
                 withContext(Dispatchers.IO) {
@@ -239,8 +232,35 @@ class MainActivity : ComponentActivity() {
         else selected.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.ENGLISH)
         val subtitle = selected.format(DateTimeFormatter.ofPattern("EEEE, d MMMM", Locale.ENGLISH))
 
+        if (adding) {
+            BackHandler { adding = false }
+            NewItemPanel(
+                startDate = selected,
+                onCancel = { adding = false },
+                onSave = { draft ->
+                    scope.launch {
+                        withContext(Dispatchers.IO) {
+                            addItem(AppDatabase.get(context), draft, selected)
+                        }
+                        adding = false
+                        version++
+                    }
+                }
+            )
+            return
+        }
+
         Scaffold(
             containerColor = PageBg,
+            floatingActionButton = {
+                ExtendedFloatingActionButton(
+                    onClick = { adding = true },
+                    containerColor = Accent,
+                    contentColor = Color.White,
+                    icon = { Text("+", fontSize = 20.sp) },
+                    text = { Text("New item", fontSize = 14.sp, fontWeight = FontWeight.Medium) }
+                )
+            },
             topBar = {
                 TopAppBar(
                     title = {
@@ -260,7 +280,7 @@ class MainActivity : ComponentActivity() {
         ) { insets ->
             LazyColumn(
                 modifier = Modifier.fillMaxSize().padding(insets),
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 96.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 item { WeekStrip(weekStart, selected, byDay, onWeek = { selected = selected.plusWeeks(it) }) { selected = it } }
@@ -317,7 +337,7 @@ class MainActivity : ComponentActivity() {
                     Column(
                         Modifier.weight(1f)
                             .clip(RoundedCornerShape(12.dp))
-                            .background(if (isSelected) Accent else Color.White)
+                            .background(if (isSelected) Accent else CardBg)
                             .border(1.dp, if (isSelected) Accent else Hairline, RoundedCornerShape(12.dp))
                             .clickable { onSelect(day) }
                             .padding(vertical = 7.dp),
@@ -362,7 +382,7 @@ class MainActivity : ComponentActivity() {
     private fun EmptyDay() {
         Card(
             shape = RoundedCornerShape(14.dp),
-            colors = CardDefaults.cardColors(containerColor = Color.White),
+            colors = CardDefaults.cardColors(containerColor = CardBg),
             elevation = CardDefaults.cardElevation(0.dp),
             modifier = Modifier.fillMaxWidth().border(1.dp, Hairline, RoundedCornerShape(14.dp))
         ) {
@@ -379,7 +399,7 @@ class MainActivity : ComponentActivity() {
     private fun SummaryCard(done: Int, total: Int, plannedMin: Int, focusMin: Int, nextAt: String) {
         Card(
             shape = RoundedCornerShape(18.dp),
-            colors = CardDefaults.cardColors(containerColor = Color.White),
+            colors = CardDefaults.cardColors(containerColor = CardBg),
             elevation = CardDefaults.cardElevation(0.dp),
             modifier = Modifier.fillMaxWidth().border(1.dp, Hairline, RoundedCornerShape(18.dp))
         ) {
@@ -408,7 +428,7 @@ class MainActivity : ComponentActivity() {
                     progress = { if (total == 0) 0f else done.toFloat() / total },
                     modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(50)),
                     color = Accent,
-                    trackColor = Color(0xFFEDEFF3)
+                    trackColor = Track
                 )
                 Spacer(Modifier.height(14.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(22.dp)) {
@@ -439,7 +459,7 @@ class MainActivity : ComponentActivity() {
                     fontWeight = FontWeight.Medium,
                     color = if (slot.isNext) Accent else Muted
                 )
-                Text(slot.end, fontSize = 10.sp, color = Color(0xFF98A2B3))
+                Text(slot.end, fontSize = 10.sp, color = Faint)
             }
             Column(
                 Modifier.width(26.dp).fillMaxHeight(),
@@ -456,7 +476,7 @@ class MainActivity : ComponentActivity() {
             Spacer(Modifier.width(6.dp))
             Card(
                 shape = RoundedCornerShape(14.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
+                colors = CardDefaults.cardColors(containerColor = CardBg),
                 elevation = CardDefaults.cardElevation(0.dp),
                 modifier = Modifier
                     .fillMaxWidth()
@@ -475,7 +495,7 @@ class MainActivity : ComponentActivity() {
                             slot.title,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Medium,
-                            color = if (slot.done) Color(0xFF98A2B3) else Ink,
+                            color = if (slot.done) Faint else Ink,
                             textDecoration = if (slot.done) TextDecoration.LineThrough else TextDecoration.None,
                             modifier = Modifier.weight(1f)
                         )
@@ -510,7 +530,7 @@ class MainActivity : ComponentActivity() {
                         Spacer(Modifier.width(8.dp))
                         Text("\u21BB ${slot.repeat}", fontSize = 11.sp, color = Muted)
                         Spacer(Modifier.weight(1f))
-                        Text(slot.duration, fontSize = 11.sp, color = Color(0xFF98A2B3))
+                        Text(slot.duration, fontSize = 11.sp, color = Faint)
                     }
                 }
             }
@@ -579,7 +599,7 @@ class MainActivity : ComponentActivity() {
         Row(
             Modifier.fillMaxWidth()
                 .border(1.dp, Hairline, RoundedCornerShape(12.dp))
-                .background(Color.White, RoundedCornerShape(12.dp))
+                .background(CardBg, RoundedCornerShape(12.dp))
                 .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
@@ -589,7 +609,7 @@ class MainActivity : ComponentActivity() {
                 Text(
                     if (ok) "Granted" else "Not granted",
                     fontSize = 11.sp,
-                    color = if (ok) Good else Color(0xFFB42318)
+                    color = if (ok) Good else Danger
                 )
             }
             if (!ok) {
