@@ -37,8 +37,10 @@ import com.yourname.dayplanner.alarm.AlarmScheduler
 import com.yourname.dayplanner.data.AppDatabase
 import com.yourname.dayplanner.data.DayEntry
 import com.yourname.dayplanner.data.DemoSeed
+import com.yourname.dayplanner.data.OccStatus
 import com.yourname.dayplanner.engine.OccurrenceGenerator
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.DayOfWeek
 import java.time.Instant
@@ -186,6 +188,19 @@ class MainActivity : ComponentActivity() {
             loaded = true
         }
 
+        // Tapping a row completes it; tapping again clears the completion.
+        val scope = rememberCoroutineScope()
+        val toggle: (UiSlot) -> Unit = { slot ->
+            scope.launch {
+                withContext(Dispatchers.IO) {
+                    val dao = AppDatabase.get(context).occurrenceDao()
+                    if (slot.done) dao.mark(slot.id, OccStatus.PENDING, null, null)
+                    else dao.mark(slot.id, OccStatus.DONE, System.currentTimeMillis(), null)
+                }
+                version++
+            }
+        }
+
         val byDay = remember(weekEntries, zone) {
             weekEntries.groupBy { Instant.ofEpochMilli(it.scheduledAt).atZone(zone).toLocalDate() }
         }
@@ -263,7 +278,7 @@ class MainActivity : ComponentActivity() {
                 if (loaded && slots.isEmpty()) {
                     item { EmptyDay() }
                 }
-                items(slots, key = { it.id }) { slot -> TimelineRow(slot) }
+                items(slots, key = { it.id }) { slot -> TimelineRow(slot, onToggle = { toggle(slot) }) }
             }
         }
     }
@@ -414,7 +429,7 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun TimelineRow(slot: UiSlot) {
+    private fun TimelineRow(slot: UiSlot, onToggle: () -> Unit) {
         val color = categoryColor(slot.category)
         Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
             Column(Modifier.width(46.dp).padding(top = 14.dp), horizontalAlignment = Alignment.End) {
@@ -446,6 +461,8 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 4.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .clickable(onClick = onToggle)
                     .border(
                         width = if (slot.isNext) 2.dp else 1.dp,
                         color = if (slot.isNext) Accent else Hairline,

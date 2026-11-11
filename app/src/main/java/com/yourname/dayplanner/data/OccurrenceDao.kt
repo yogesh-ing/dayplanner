@@ -32,7 +32,7 @@ interface OccurrenceDao {
 
     @Query("SELECT MAX(actualEnd) FROM occurrences WHERE itemId = :itemId AND status IN ('DONE','PARTIAL')") suspend fun lastCompletedAt(itemId: Long): Long?
 
-    @Query("UPDATE occurrences SET status = :status, actualEnd = :at, skipReason = :reason WHERE id = :id") suspend fun mark(id: Long, status: OccStatus, at: Long, reason: SkipReason?)
+    @Query("UPDATE occurrences SET status = :status, actualEnd = :at, skipReason = :reason WHERE id = :id") suspend fun mark(id: Long, status: OccStatus, at: Long?, reason: SkipReason?)
 
     /** Everything scheduled in [from, to), with the item and rule needed to render it. */
     @Query(
