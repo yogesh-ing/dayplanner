@@ -66,13 +66,13 @@ private fun categoryColor(category: String): Color = when (category) {
 /* ---------------------------------------------------------------- helpers */
 
 /** Week starts Monday. */
-private fun mondayOf(day: LocalDate): LocalDate =
+internal fun mondayOf(day: LocalDate): LocalDate =
     day.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
 
 private fun hhmm(minuteOfDay: Int): String =
     String.format(Locale.ENGLISH, "%02d:%02d", (minuteOfDay / 60) % 24, minuteOfDay % 60)
 
-private fun durationText(minutes: Int): String = when {
+internal fun durationText(minutes: Int): String = when {
     minutes < 60 -> "$minutes min"
     minutes % 60 == 0 -> "${minutes / 60} h"
     else -> "${minutes / 60} h ${minutes % 60}"
@@ -103,6 +103,7 @@ private fun repeatLabel(frequency: String?, interval: Int, weekdaysMask: Int): S
 /** One row of the timeline, already formatted for display. */
 private data class UiSlot(
     val id: Long,
+    val itemId: Long,
     val start: String,
     val end: String,
     val title: String,
@@ -156,6 +157,7 @@ class MainActivity : ComponentActivity() {
         var loaded by remember { mutableStateOf(false) }
         var version by remember { mutableIntStateOf(0) }
         var adding by remember { mutableStateOf(false) }
+        var inspecting by remember { mutableStateOf<UiSlot?>(null) }
 
         val weekStart = mondayOf(selected)
         val scope = rememberCoroutineScope()
@@ -216,6 +218,7 @@ class MainActivity : ComponentActivity() {
                 val startMin = start.hour * 60 + start.minute
                 UiSlot(
                     id = e.id,
+                    itemId = e.itemId,
                     start = hhmm(startMin),
                     end = hhmm(startMin + e.durationMin),
                     title = e.title,
@@ -247,6 +250,13 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             )
+            return
+        }
+
+        val inspected = inspecting
+        if (inspected != null) {
+            BackHandler { inspecting = null }
+            ProgressPanel(itemId = inspected.itemId, onClose = { inspecting = null })
             return
         }
 
@@ -298,7 +308,9 @@ class MainActivity : ComponentActivity() {
                 if (loaded && slots.isEmpty()) {
                     item { EmptyDay() }
                 }
-                items(slots, key = { it.id }) { slot -> TimelineRow(slot, onToggle = { toggle(slot) }) }
+                items(slots, key = { it.id }) { slot ->
+                    TimelineRow(slot, onToggle = { toggle(slot) }, onOpen = { inspecting = slot })
+                }
             }
         }
     }
@@ -449,7 +461,7 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun TimelineRow(slot: UiSlot, onToggle: () -> Unit) {
+    private fun TimelineRow(slot: UiSlot, onToggle: () -> Unit, onOpen: () -> Unit) {
         val color = categoryColor(slot.category)
         Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
             Column(Modifier.width(46.dp).padding(top = 14.dp), horizontalAlignment = Alignment.End) {
@@ -531,6 +543,22 @@ class MainActivity : ComponentActivity() {
                         Text("\u21BB ${slot.repeat}", fontSize = 11.sp, color = Muted)
                         Spacer(Modifier.weight(1f))
                         Text(slot.duration, fontSize = 11.sp, color = Faint)
+                        Spacer(Modifier.width(8.dp))
+                        Surface(
+                            color = AccentSoft,
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .clickable(onClick = onOpen)
+                        ) {
+                            Text(
+                                "Stats",
+                                color = Accent,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
                     }
                 }
             }

@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.Flow
 /** One scheduled row as the timetable renders it: occurrence + item + repeat rule. */
 data class DayEntry(
     val id: Long,
+    val itemId: Long,
     val scheduledAt: Long,
     val status: String,
     val title: String,
@@ -37,7 +38,7 @@ interface OccurrenceDao {
     /** Everything scheduled in [from, to), with the item and rule needed to render it. */
     @Query(
         """
-        SELECT o.id AS id, o.scheduledAt AS scheduledAt, o.status AS status,
+        SELECT o.id AS id, o.itemId AS itemId, o.scheduledAt AS scheduledAt, o.status AS status,
                i.title AS title, i.category AS category, i.durationMin AS durationMin,
                r.frequency AS frequency, r.interval AS repeatInterval, r.weekdaysMask AS weekdaysMask
         FROM occurrences o
@@ -48,4 +49,28 @@ interface OccurrenceDao {
         """
     )
     suspend fun dayEntries(from: Long, to: Long): List<DayEntry>
+
+    /** Every occurrence of one item in [from, to), for the progress screen. */
+    @Query(
+        """
+        SELECT o.scheduledAt AS scheduledAt, o.status AS status,
+               o.actualStart AS actualStart, o.actualEnd AS actualEnd,
+               o.skipReason AS skipReason, i.durationMin AS durationMin
+        FROM occurrences o
+        JOIN items i ON i.id = o.itemId
+        WHERE o.itemId = :itemId AND o.scheduledAt >= :from AND o.scheduledAt < :to
+        ORDER BY o.scheduledAt
+        """
+    )
+    suspend fun itemHistory(itemId: Long, from: Long, to: Long): List<ItemOccurrence>
 }
+
+/** One occurrence of a single item, as the progress screen reads it. */
+data class ItemOccurrence(
+    val scheduledAt: Long,
+    val status: String,
+    val actualStart: Long?,
+    val actualEnd: Long?,
+    val skipReason: String?,
+    val durationMin: Int
+)

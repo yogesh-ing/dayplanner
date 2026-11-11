@@ -218,7 +218,7 @@ private fun Field(label: String, content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun <T> ChoiceRow(
+internal fun <T> ChoiceRow(
     options: List<T>,
     selected: T,
     label: (T) -> String,
