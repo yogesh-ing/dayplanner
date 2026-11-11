@@ -9,6 +9,7 @@ data class DayEntry(
     val itemId: Long,
     val scheduledAt: Long,
     val status: String,
+    val skipReason: String?,
     val title: String,
     val category: String,
     val durationMin: Int,
@@ -46,6 +47,7 @@ interface OccurrenceDao {
     @Query(
         """
         SELECT o.id AS id, o.itemId AS itemId, o.scheduledAt AS scheduledAt, o.status AS status,
+               o.skipReason AS skipReason,
                i.title AS title, i.category AS category, i.durationMin AS durationMin,
                r.frequency AS frequency, r.interval AS repeatInterval, r.weekdaysMask AS weekdaysMask
         FROM occurrences o

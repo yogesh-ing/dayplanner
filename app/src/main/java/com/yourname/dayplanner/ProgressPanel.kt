@@ -591,7 +591,7 @@ private fun ReasonCard(progress: Progress) {
             )
             for ((reason, count) in progress.reasons) {
                 Row(Modifier.fillMaxWidth()) {
-                    Text(reasonLabel(reason), fontSize = 13.sp, color = Ink, modifier = Modifier.weight(1f))
+                    Text(skipReasonLabel(reason), fontSize = 13.sp, color = Ink, modifier = Modifier.weight(1f))
                     Text("$count", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Danger)
                 }
             }
@@ -604,7 +604,7 @@ private fun Caption(text: String) {
     Text(text, fontSize = 12.sp, color = Muted, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
 }
 
-private fun reasonLabel(raw: String): String =
+internal fun skipReasonLabel(raw: String): String =
     raw.lowercase(Locale.ENGLISH).split('_')
         .joinToString(" ") { word -> word.replaceFirstChar { it.uppercase(Locale.ENGLISH) } }
 

@@ -15,7 +15,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -29,6 +31,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -38,6 +41,7 @@ import com.yourname.dayplanner.data.AppDatabase
 import com.yourname.dayplanner.data.DayEntry
 import com.yourname.dayplanner.data.DemoSeed
 import com.yourname.dayplanner.data.OccStatus
+import com.yourname.dayplanner.data.SkipReason
 import com.yourname.dayplanner.engine.OccurrenceGenerator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -111,6 +115,8 @@ private data class UiSlot(
     val repeat: String,
     val duration: String,
     val done: Boolean,
+    val skipped: Boolean,
+    val reason: String?,
     val isNext: Boolean
 )
 
@@ -158,6 +164,7 @@ class MainActivity : ComponentActivity() {
         var version by remember { mutableIntStateOf(0) }
         var adding by remember { mutableStateOf(false) }
         var inspecting by remember { mutableStateOf<UiSlot?>(null) }
+        var skipTarget by remember { mutableStateOf<UiSlot?>(null) }
 
         val weekStart = mondayOf(selected)
         val scope = rememberCoroutineScope()
@@ -196,6 +203,22 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // Long-press a row to record why it did not happen; null reason clears the mark.
+        val markSkipped: (UiSlot, SkipReason?) -> Unit = { slot, reason ->
+            scope.launch {
+                withContext(Dispatchers.IO) {
+                    AppDatabase.get(context).occurrenceDao().mark(
+                        slot.id,
+                        if (reason == null) OccStatus.PENDING else OccStatus.SKIPPED,
+                        if (reason == null) null else System.currentTimeMillis(),
+                        reason
+                    )
+                }
+                skipTarget = null
+                version++
+            }
+        }
+
         val byDay = remember(weekEntries, zone) {
             weekEntries.groupBy { Instant.ofEpochMilli(it.scheduledAt).atZone(zone).toLocalDate() }
         }
@@ -226,6 +249,8 @@ class MainActivity : ComponentActivity() {
                     repeat = repeatLabel(e.frequency, e.repeatInterval, e.weekdaysMask),
                     duration = durationText(e.durationMin),
                     done = e.status == "DONE" || e.status == "PARTIAL",
+                    skipped = e.status == "SKIPPED",
+                    reason = e.skipReason?.let { skipReasonLabel(it) },
                     isNext = next?.id == e.id
                 )
             }
@@ -258,6 +283,16 @@ class MainActivity : ComponentActivity() {
             BackHandler { inspecting = null }
             ProgressPanel(itemId = inspected.itemId, onClose = { inspecting = null; version++ })
             return
+        }
+
+        val target = skipTarget
+        if (target != null) {
+            SkipReasonDialog(
+                slot = target,
+                onPick = { reason -> markSkipped(target, reason) },
+                onClear = if (target.skipped) ({ markSkipped(target, null) }) else null,
+                onDismiss = { skipTarget = null }
+            )
         }
 
         Scaffold(
@@ -309,7 +344,12 @@ class MainActivity : ComponentActivity() {
                     item { EmptyDay() }
                 }
                 items(slots, key = { it.id }) { slot ->
-                    TimelineRow(slot, onToggle = { toggle(slot) }, onOpen = { inspecting = slot })
+                    TimelineRow(
+                        slot = slot,
+                        onToggle = { toggle(slot) },
+                        onLongPress = { skipTarget = slot },
+                        onOpen = { inspecting = slot }
+                    )
                 }
             }
         }
@@ -460,8 +500,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @OptIn(ExperimentalFoundationApi::class)
     @Composable
-    private fun TimelineRow(slot: UiSlot, onToggle: () -> Unit, onOpen: () -> Unit) {
+    private fun TimelineRow(
+        slot: UiSlot,
+        onToggle: () -> Unit,
+        onLongPress: () -> Unit,
+        onOpen: () -> Unit
+    ) {
         val color = categoryColor(slot.category)
         Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
             Column(Modifier.width(46.dp).padding(top = 14.dp), horizontalAlignment = Alignment.End) {
@@ -494,7 +540,7 @@ class MainActivity : ComponentActivity() {
                     .fillMaxWidth()
                     .padding(vertical = 4.dp)
                     .clip(RoundedCornerShape(14.dp))
-                    .clickable(onClick = onToggle)
+                    .combinedClickable(onClick = onToggle, onLongClick = onLongPress)
                     .border(
                         width = if (slot.isNext) 2.dp else 1.dp,
                         color = if (slot.isNext) Accent else Hairline,
@@ -521,6 +567,11 @@ class MainActivity : ComponentActivity() {
                                     modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
                                 )
                             }
+                        } else if (slot.skipped) {
+                            Box(
+                                Modifier.size(18.dp).clip(CircleShape).background(Danger.copy(alpha = 0.12f)),
+                                contentAlignment = Alignment.Center
+                            ) { Text("–", fontSize = 11.sp, color = Danger) }
                         } else if (slot.done) {
                             Box(
                                 Modifier.size(18.dp).clip(CircleShape).background(Good.copy(alpha = 0.14f)),
@@ -543,6 +594,15 @@ class MainActivity : ComponentActivity() {
                         Text("\u21BB ${slot.repeat}", fontSize = 11.sp, color = Muted)
                         Spacer(Modifier.weight(1f))
                         Text(slot.duration, fontSize = 11.sp, color = Faint)
+                        if (slot.skipped) {
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                slot.reason ?: "Skipped",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = Danger
+                            )
+                        }
                         Spacer(Modifier.width(8.dp))
                         Surface(
                             color = AccentSoft,
@@ -563,6 +623,62 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    /* --------------------------------------------------------- skip reason */
+
+    /** Long-press a row to say why it did not happen. */
+    @Composable
+    private fun SkipReasonDialog(
+        slot: UiSlot,
+        onPick: (SkipReason) -> Unit,
+        onClear: (() -> Unit)?,
+        onDismiss: () -> Unit
+    ) {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = {
+                Text(slot.title, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+            },
+            text = {
+                Column {
+                    Text(
+                        "Why didn't it happen? The progress screen uses this to explain the pattern.",
+                        fontSize = 12.sp,
+                        color = Muted
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    for (reason in SkipReason.entries) {
+                        TextButton(
+                            onClick = { onPick(reason) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                skipReasonLabel(reason.name),
+                                modifier = Modifier.fillMaxWidth(),
+                                textAlign = TextAlign.Start,
+                                fontSize = 14.sp,
+                                color = Ink
+                            )
+                        }
+                    }
+                    if (onClear != null) {
+                        TextButton(onClick = onClear, modifier = Modifier.fillMaxWidth()) {
+                            Text(
+                                "Clear this mark",
+                                modifier = Modifier.fillMaxWidth(),
+                                textAlign = TextAlign.Start,
+                                fontSize = 13.sp,
+                                color = Accent
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = Muted) } },
+            containerColor = CardBg
+        )
     }
 
     /* ------------------------------------------------------- alarm spike */
